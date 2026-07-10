@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>BlockQuest Classroom</title>
+<title>BlockQuest Classroom — Supabase Cloud</title>
 <style>
 :root{--sky:#72d6ff;--grass:#73c94d;--grass2:#49a83c;--dirt:#a86b3d;--stone:#66717d;--ink:#173047;--cream:#fff8dc;--gold:#ffd84d;--red:#ff5f57;--blue:#4d8dff;--shadow:#16384d55}
 *{box-sizing:border-box}body{margin:0;font-family:Trebuchet MS,Arial,sans-serif;color:var(--ink);background:linear-gradient(#65cfff 0 38%,#b7ecff 38% 46%,#75ce52 46% 100%);min-height:100vh;background-attachment:fixed}
@@ -44,13 +44,13 @@ header{background:linear-gradient(#83512f 0 70%,#5f3b24 70%);border:5px solid #3
       <button class="btn gold" style="width:100%" id="createTeacherBtn">Create Teacher Page</button>
     </div>
     <div id="authError" class="auth-error"></div>
-    <div class="auth-note" id="firebaseNote"><b>GitHub Pages mode:</b> teacher profiles and classroom data are stored in this browser. Use Export Backup and Import Backup to move data to another device.</div>
+    <div class="auth-note" id="firebaseNote"><b>Supabase cloud mode:</b> sign in with email and password to access your classroom data across devices. Your teacher account must be confirmed if email confirmation is enabled.</div>
   </div>
 </div>
 <div class="app signed-out" id="mainApp">
 <header>
   <div class="brand"><div class="logo"></div><div><h1>BLOCKQUEST CLASSROOM</h1><small>Build skills • Earn XP • Unlock rewards</small></div></div>
-  <div class="modebar"><span class="account-chip" id="accountChip">Teacher</span><span class="sync-chip" id="syncChip">Saved locally</span><button class="btn red" id="signOutBtn">Sign Out</button><button class="btn gold" id="studentModeBtn">Student View</button><button class="btn blue" id="teacherModeBtn">Teacher Mode</button><button class="btn dark" id="settingsBtn">⚙ Settings</button></div>
+  <div class="modebar"><span class="account-chip" id="accountChip">Teacher</span><span class="sync-chip" id="syncChip">Connecting…</span><button class="btn red" id="signOutBtn">Sign Out</button><button class="btn gold" id="studentModeBtn">Student View</button><button class="btn blue" id="teacherModeBtn">Teacher Mode</button><button class="btn dark" id="settingsBtn">⚙ Settings</button></div>
 </header>
 <div class="layout">
   <aside class="panel sidebar">
@@ -77,28 +77,90 @@ header{background:linear-gradient(#83512f 0 70%,#5f3b24 70%);border:5px solid #3
     </div>
   </main>
 </div>
-<footer>This GitHub Pages edition stores teacher accounts and classroom data in this browser. Export backups regularly, especially before changing device or clearing browser data. Inspired by classroom gamification systems; no affiliation with Minecraft or Classcraft.</footer>
+<footer>This GitHub Pages frontend uses Supabase Authentication and Postgres storage for cross-device access. Keep Row Level Security enabled. Inspired by classroom gamification systems; no affiliation with Minecraft or Classcraft.</footer>
 </div>
 <div id="modalRoot"></div><div id="toastRoot"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 'use strict';
-const LEGACY_KEY='blockquest_classroom_v1',PROFILE_KEY='blockquest_github_profiles_v1';
+const SUPABASE_URL='https://gkdhagcszbydcfmminbz.supabase.co/rest/v1/';
+const SUPABASE_PUBLISHABLE_KEY='sb_publishable_mQmHJt1xQ5RyUXC91VNMFg_oBUThodq';
+const supabaseConfigured=SUPABASE_URL.startsWith('https://')&&!SUPABASE_URL.includes('PASTE_')&&!SUPABASE_PUBLISHABLE_KEY.includes('PASTE_');
+const sb=supabaseConfigured?window.supabase.createClient(SUPABASE_URL,SUPABASE_PUBLISHABLE_KEY):null;
+const LEGACY_KEY='blockquest_classroom_v1',LOCAL_BACKUP_KEY='blockquest_supabase_unsynced_v1';
 const defaultPerks=Array.from({length:20},(_,i)=>({level:(i+1)*3,name:['Choose your seat for one lesson','Homework hint token','Five-minute music pass','Use a fun pen for class','Team captain privilege','One-day late pass','Mystery reward','Class helper role','Positive message home','Pick a warm-up question','Bonus break minute','Use teacher chair briefly','Skip one routine question','Choose group name','Digital sticker pack','Lead a class game','Priority resource access','Design a class challenge','Legendary privilege','Level 60 celebration'][i]}));
 const fresh=()=>({pin:'2468',classes:[],perks:defaultPerks.map(x=>({...x})),selectedClassId:null,mode:'teacher'});
 function normalizeData(d){const out=d&&Array.isArray(d.classes)?{...fresh(),...d}:fresh();out.perks=Array.isArray(out.perks)?out.perks:defaultPerks.map(x=>({...x}));out.classes.forEach(c=>{c.students=(c.students||[]).map(s=>({...s,history:s.history||[],questStats:s.questStats||{streak:0,lastCorrectDate:null,totalCompleted:0}}));c.dailyQuest=c.dailyQuest||null;c.questSubmissions=c.questSubmissions||[]});return out}
-let currentTeacher=null,data=fresh(),teacherUnlocked=false;
-function getStore(){try{const x=JSON.parse(localStorage.getItem(PROFILE_KEY));return x&&Array.isArray(x.teachers)?x:{teachers:[]}}catch{return {teachers:[]}}}
-function putStore(store){localStorage.setItem(PROFILE_KEY,JSON.stringify(store))}
-async function passwordHash(value){const bytes=new TextEncoder().encode(value);const digest=await crypto.subtle.digest('SHA-256',bytes);return [...new Uint8Array(digest)].map(x=>x.toString(16).padStart(2,'0')).join('')}
+let currentTeacher=null,data=fresh(),teacherUnlocked=false,saveTimer=null,saving=false,pendingSave=false;
 function setSync(text,state=''){const el=document.getElementById('syncChip');if(!el)return;el.textContent=text;el.className='sync-chip'+(state?' '+state:'')}
 function showAuth(message=''){document.getElementById('mainApp').classList.add('signed-out');document.getElementById('authScreen').classList.remove('hidden');document.getElementById('authError').textContent=message;setTimeout(()=>document.getElementById('loginEmail')?.focus(),20)}
 function switchAuthTab(create){document.getElementById('signInPane').classList.toggle('hidden',create);document.getElementById('createPane').classList.toggle('hidden',!create);document.getElementById('signInTab').classList.toggle('active',!create);document.getElementById('createTab').classList.toggle('active',create);document.getElementById('authError').textContent=''}
-function openTeacher(profile){currentTeacher={id:profile.id,email:profile.email,displayName:profile.displayName};data=normalizeData(profile.data);if(!data.selectedClassId&&data.classes[0])data.selectedClassId=data.classes[0].id;teacherUnlocked=true;document.getElementById('authScreen').classList.add('hidden');document.getElementById('mainApp').classList.remove('signed-out');document.getElementById('accountChip').textContent='👤 '+currentTeacher.displayName;setSync('Saved locally');render()}
-function save(){if(!currentTeacher)return;const store=getStore(),i=store.teachers.findIndex(x=>x.id===currentTeacher.id);if(i<0)return;store.teachers[i]={...store.teachers[i],email:currentTeacher.email,displayName:currentTeacher.displayName,data};putStore(store);setSync('Saved locally')}
-async function signIn(){const email=document.getElementById('loginEmail').value.trim().toLowerCase(),password=document.getElementById('loginPassword').value;if(!email||!password)return showAuth('Enter your email and password.');document.getElementById('authError').textContent='Checking account…';const store=getStore(),profile=store.teachers.find(x=>x.email===email);if(!profile||profile.passwordHash!==await passwordHash(password))return showAuth('Email or password is incorrect on this device.');document.getElementById('loginPassword').value='';openTeacher(profile)}
-async function createTeacher(){const displayName=document.getElementById('newDisplayName').value.trim(),email=document.getElementById('newEmail').value.trim().toLowerCase(),password=document.getElementById('newPassword').value,confirmPassword=document.getElementById('confirmPassword').value;if(!displayName)return showAuth('Enter a display name.');if(!/^\S+@\S+\.\S+$/.test(email))return showAuth('Enter a valid email address.');if(password.length<6)return showAuth('Use a password of at least 6 characters.');if(password!==confirmPassword)return showAuth('The passwords do not match.');const store=getStore();if(store.teachers.some(x=>x.email===email))return showAuth('An account with this email already exists on this device.');const profile={id:'t'+Date.now()+Math.random().toString(36).slice(2),displayName,email,passwordHash:await passwordHash(password),data:fresh(),createdAt:new Date().toISOString()};store.teachers.push(profile);putStore(store);openTeacher(profile);toast('Teacher profile created on this device!')}
-function signOut(){save();currentTeacher=null;data=fresh();teacherUnlocked=false;setSync('Signed out');showAuth()}
-function initLocalProfiles(){showAuth();const old=localStorage.getItem(LEGACY_KEY);if(old&&!localStorage.getItem('blockquest_legacy_notice')){localStorage.setItem('blockquest_legacy_notice','yes');document.getElementById('authError').textContent='Older BlockQuest data may exist in this browser. Sign in, then use Import Backup if you previously exported it.'}}
+async function loadTeacher(user){
+  setSync('Loading cloud data…');
+  const {data:row,error}=await sb.from('teacher_profiles').select('display_name,app_data').eq('user_id',user.id).maybeSingle();
+  if(error){showAuth('Could not load your profile: '+error.message);setSync('Load failed','bad');return}
+  const displayName=row?.display_name||user.user_metadata?.display_name||user.email.split('@')[0];
+  if(!row){
+    const initial=fresh();
+    const {error:insertError}=await sb.from('teacher_profiles').insert({user_id:user.id,display_name:displayName,app_data:initial});
+    if(insertError){showAuth('Could not create your profile: '+insertError.message);setSync('Setup failed','bad');return}
+    data=initial;
+  }else data=normalizeData(row.app_data);
+  currentTeacher={id:user.id,email:user.email,displayName};
+  if(!data.selectedClassId&&data.classes[0])data.selectedClassId=data.classes[0].id;
+  teacherUnlocked=true;
+  document.getElementById('authScreen').classList.add('hidden');
+  document.getElementById('mainApp').classList.remove('signed-out');
+  document.getElementById('accountChip').textContent='👤 '+displayName;
+  setSync('Cloud synced','good');
+  render();
+}
+function queueSave(){
+  if(!currentTeacher||!sb)return;
+  pendingSave=true;setSync('Saving…');clearTimeout(saveTimer);saveTimer=setTimeout(flushSave,650);
+}
+async function flushSave(){
+  if(!currentTeacher||!sb||saving||!pendingSave)return;
+  saving=true;pendingSave=false;
+  const snapshot=JSON.parse(JSON.stringify(data));
+  localStorage.setItem(LOCAL_BACKUP_KEY,JSON.stringify(snapshot));
+  const {error}=await sb.from('teacher_profiles').upsert({user_id:currentTeacher.id,display_name:currentTeacher.displayName,app_data:snapshot,updated_at:new Date().toISOString()},{onConflict:'user_id'});
+  saving=false;
+  if(error){setSync('Cloud save failed','bad');toast('Cloud save failed. A local emergency copy was kept.');return}
+  localStorage.removeItem(LOCAL_BACKUP_KEY);setSync('Cloud synced','good');
+  if(pendingSave)flushSave();
+}
+function save(){queueSave()}
+async function signIn(){
+  if(!supabaseConfigured)return showAuth('Add your Supabase URL and publishable key to index.html first.');
+  const email=document.getElementById('loginEmail').value.trim().toLowerCase(),password=document.getElementById('loginPassword').value;
+  if(!email||!password)return showAuth('Enter your email and password.');
+  document.getElementById('authError').textContent='Signing in…';
+  const {data:authData,error}=await sb.auth.signInWithPassword({email,password});
+  if(error)return showAuth(error.message);
+  document.getElementById('loginPassword').value='';
+  await loadTeacher(authData.user);
+}
+async function createTeacher(){
+  if(!supabaseConfigured)return showAuth('Add your Supabase URL and publishable key to index.html first.');
+  const displayName=document.getElementById('newDisplayName').value.trim(),email=document.getElementById('newEmail').value.trim().toLowerCase(),password=document.getElementById('newPassword').value,confirmPassword=document.getElementById('confirmPassword').value;
+  if(!displayName)return showAuth('Enter a display name.');if(!/^\S+@\S+\.\S+$/.test(email))return showAuth('Enter a valid email address.');if(password.length<6)return showAuth('Use a password of at least 6 characters.');if(password!==confirmPassword)return showAuth('The passwords do not match.');
+  document.getElementById('authError').textContent='Creating account…';
+  const {data:authData,error}=await sb.auth.signUp({email,password,options:{data:{display_name:displayName}}});
+  if(error)return showAuth(error.message);
+  if(!authData.session){switchAuthTab(false);document.getElementById('loginEmail').value=email;return showAuth('Account created. Check your email to confirm it, then sign in.');}
+  await loadTeacher(authData.user);toast('Cloud teacher account created!');
+}
+async function signOut(){
+  await flushSave();if(sb)await sb.auth.signOut();currentTeacher=null;data=fresh();teacherUnlocked=false;setSync('Signed out');showAuth();
+}
+async function initSupabase(){
+  showAuth(supabaseConfigured?'Checking your session…':'Setup required: paste your Supabase URL and publishable key into index.html.');
+  if(!supabaseConfigured){setSync('Not configured','bad');return}
+  const {data:{session}}=await sb.auth.getSession();
+  if(session?.user)await loadTeacher(session.user);else showAuth('');
+  sb.auth.onAuthStateChange((event,session)=>{if(event==='SIGNED_OUT'){currentTeacher=null;data=fresh();teacherUnlocked=false;showAuth('')}});
+}
 function load(){return fresh()}
 const uid=()=>crypto.randomUUID?crypto.randomUUID():'id'+Date.now()+Math.random();
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -153,19 +215,19 @@ window.clearHistory=id=>{if(confirm('Clear this student’s XP log? Their curren
 window.editStudent=id=>{const s=currentClass().students.find(x=>x.id===id);modal('Edit Student',`<div class="field"><label>Name</label><input id="editName" value="${esc(s.name)}"></div><div class="field"><label>Total XP (0–5900)</label><input id="editXp" type="number" min="0" max="5900" value="${s.xp}"></div>`,`<button class="btn primary" onclick="saveStudent('${id}')">Save Changes</button>`)}
 window.saveStudent=id=>{const s=currentClass().students.find(x=>x.id===id),name=document.getElementById('editName').value.trim(),xp=Math.trunc(Number(document.getElementById('editXp').value));if(!name||!Number.isFinite(xp))return toast('Enter valid details.');s.name=name;s.xp=Math.max(0,Math.min(5900,xp));closeModal();render();toast('Student updated.')}
 window.removeStudent=id=>{const c=currentClass(),s=c.students.find(x=>x.id===id);if(confirm(`Remove ${s.name} from this class?`)){c.students=c.students.filter(x=>x.id!==id);render();toast('Student removed.')}}
-function editPerks(){modal('Customize Level Perks',`<p>Students unlock one perk every 3 levels. Changes are saved in this browser.</p><div id="perkFields">${data.perks.map((p,i)=>`<div class="perk-editor"><b>Lv ${p.level}</b><input id="perk${i}" maxlength="90" value="${esc(p.name)}"></div>`).join('')}</div>`,`<button class="btn primary" onclick="savePerks()">Save Perks</button>`)}
+function editPerks(){modal('Customize Level Perks',`<p>Students unlock one perk every 3 levels. Changes are saved to your Supabase cloud account.</p><div id="perkFields">${data.perks.map((p,i)=>`<div class="perk-editor"><b>Lv ${p.level}</b><input id="perk${i}" maxlength="90" value="${esc(p.name)}"></div>`).join('')}</div>`,`<button class="btn primary" onclick="savePerks()">Save Perks</button>`)}
 window.savePerks=()=>{data.perks=data.perks.map((p,i)=>({...p,name:document.getElementById('perk'+i).value.trim()}));closeModal();render();toast('Perks updated!')}
 function deleteClass(){const c=currentClass();if(!c)return toast('Select a class first.');if(confirm(`Permanently delete ${c.name} and all its student data?`)){data.classes=data.classes.filter(x=>x.id!==c.id);data.selectedClassId=data.classes[0]?.id||null;render();toast('Class deleted.')}}
 function studentMode(){data.mode='student';teacherUnlocked=false;render();toast('Student view enabled.')}
 function teacherMode(){modal('Teacher Access',`<div class="field"><label>Enter teacher PIN</label><input id="pinInput" type="password" inputmode="numeric" maxlength="12" placeholder="PIN"></div><div class="notice">Default PIN for a new file is <b>2468</b>. Change it in Settings.</div>`,`<button class="btn blue" onclick="unlockTeacher()">Unlock</button>`);setTimeout(()=>document.getElementById('pinInput').focus(),30)}
 window.unlockTeacher=()=>{if(document.getElementById('pinInput').value===data.pin){teacherUnlocked=true;data.mode='teacher';closeModal();render();toast('Teacher mode unlocked.')}else toast('Incorrect PIN.')}
-function settings(){modal('Settings & Data',`<div class="notice"><b>Signed in as ${esc(currentTeacher.displayName)}</b><br>${esc(currentTeacher.email)}</div><div class="field"><label>Display name</label><input id="profileDisplayName" maxlength="50" value="${esc(currentTeacher.displayName)}"></div><div class="field"><label>New account password</label><input id="accountPassword" type="password" maxlength="100" placeholder="Leave blank to keep current password"></div><div class="field"><label>New teacher PIN</label><input id="newPin" type="password" maxlength="12" placeholder="Leave blank to keep current PIN"></div><div class="notice">This profile is stored only in this browser. Export a backup to transfer classroom data to another device. The teacher PIN prevents casual changes while Student View is open.</div><div class="danger-zone"><b>Reset this teacher page</b><p>This removes every class, student, perk and XP log from this local profile.</p><button class="btn red" onclick="resetAll()">Reset Everything</button></div>`,`<button class="btn primary" onclick="saveSettings()">Save Settings</button>`)}
-window.saveSettings=async()=>{const name=document.getElementById('profileDisplayName').value.trim(),accountPassword=document.getElementById('accountPassword').value,p=document.getElementById('newPin').value.trim();if(!name)return toast('Enter a display name.');if(accountPassword&&accountPassword.length<6)return toast('Use an account password of at least 6 characters.');if(p&&p.length<4)return toast('Use a PIN of at least 4 characters.');const store=getStore(),profile=store.teachers.find(x=>x.id===currentTeacher.id);if(!profile)return toast('Local profile could not be found.');currentTeacher.displayName=name;profile.displayName=name;if(accountPassword)profile.passwordHash=await passwordHash(accountPassword);if(p)data.pin=p;profile.data=data;putStore(store);document.getElementById('accountChip').textContent='👤 '+name;closeModal();render();toast('Local settings saved.')}
+function settings(){modal('Settings & Data',`<div class="notice"><b>Signed in as ${esc(currentTeacher.displayName)}</b><br>${esc(currentTeacher.email)}</div><div class="field"><label>Display name</label><input id="profileDisplayName" maxlength="50" value="${esc(currentTeacher.displayName)}"></div><div class="field"><label>New account password</label><input id="accountPassword" type="password" maxlength="100" placeholder="Leave blank to keep current password"></div><div class="field"><label>New teacher PIN</label><input id="newPin" type="password" maxlength="12" placeholder="Leave blank to keep current PIN"></div><div class="notice">This profile is stored in Supabase and syncs across devices. Export backups regularly as an additional safeguard. The teacher PIN prevents casual changes while Student View is open.</div><div class="danger-zone"><b>Reset this teacher page</b><p>This removes every class, student, perk and XP log from your cloud profile.</p><button class="btn red" onclick="resetAll()">Reset Everything</button></div>`,`<button class="btn primary" onclick="saveSettings()">Save Settings</button>`)}
+window.saveSettings=async()=>{const name=document.getElementById('profileDisplayName').value.trim(),accountPassword=document.getElementById('accountPassword').value,p=document.getElementById('newPin').value.trim();if(!name)return toast('Enter a display name.');if(accountPassword&&accountPassword.length<6)return toast('Use an account password of at least 6 characters.');if(p&&p.length<4)return toast('Use a PIN of at least 4 characters.');if(accountPassword){const {error}=await sb.auth.updateUser({password:accountPassword});if(error)return toast(error.message)}currentTeacher.displayName=name;if(p)data.pin=p;document.getElementById('accountChip').textContent='👤 '+name;closeModal();render();await flushSave();toast('Cloud settings saved.')}
 window.resetAll=()=>{if(confirm('This cannot be undone unless you exported a backup. Reset everything?')){data=fresh();teacherUnlocked=true;closeModal();render();toast('All data reset.')}}
 function exportData(){const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='blockquest-'+(currentTeacher?.email?.split('@')[0]||'teacher')+'-backup-'+new Date().toISOString().slice(0,10)+'.json';a.click();URL.revokeObjectURL(a.href);toast('Backup exported.')}
 function importData(file){const r=new FileReader();r.onload=()=>{try{const d=JSON.parse(r.result);if(!Array.isArray(d.classes)||!Array.isArray(d.perks))throw 0;if(confirm('Replace current data with this backup?')){data={...fresh(),...d};teacherUnlocked=true;render();save();toast('Backup imported.')}}catch{toast('That file is not a valid BlockQuest backup.')}};r.readAsText(file)}
 document.getElementById('addClassBtn').onclick=()=>makeClass(false);document.getElementById('editClassBtn').onclick=()=>makeClass(true);document.getElementById('deleteClassBtn').onclick=deleteClass;document.getElementById('addStudentBtn').onclick=addStudents;document.getElementById('groupXpBtn').onclick=groupXp;document.getElementById('perkBtn').onclick=editPerks;document.getElementById('studentModeBtn').onclick=studentMode;document.getElementById('teacherModeBtn').onclick=teacherMode;document.getElementById('settingsBtn').onclick=settings;document.getElementById('exportBtn').onclick=exportData;document.getElementById('importInput').onchange=e=>e.target.files[0]&&importData(e.target.files[0]);document.getElementById('signOutBtn').onclick=signOut;document.getElementById('signInTab').onclick=()=>switchAuthTab(false);document.getElementById('createTab').onclick=()=>switchAuthTab(true);document.getElementById('loginBtn').onclick=signIn;document.getElementById('createTeacherBtn').onclick=createTeacher;document.getElementById('loginPassword').addEventListener('keydown',e=>e.key==='Enter'&&signIn());document.getElementById('confirmPassword').addEventListener('keydown',e=>e.key==='Enter'&&createTeacher());
-initLocalProfiles();
+initSupabase();
 </script>
 </body>
 </html>
